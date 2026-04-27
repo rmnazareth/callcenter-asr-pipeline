@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Local Whisper Chat V2</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="chat-container">
+    <div class="chat-header">🎙️ Sinhala ASR V2</div>
+    <div class="chat-body" id="chat-body">
+      <div class="bot-message message">Upload a file or record audio to get a transcription.</div>
+    </div>
+    <div class="chat-footer">
+      <label for="fileInput" class="upload-label">
+        📁 Upload file
+      </label>
+      <input type="file" id="fileInput" accept=".wav, .mp3">
+      <button id="recordBtn">🎤 Record Audio</button>
+      <button id="stopBtn" disabled>🛑 Stop Recording</button>
+    </div>
+  </div>
+
+  <script>
+    const fileInput = document.getElementById("fileInput");
+    const chatBody = document.getElementById("chat-body");
+    const recordBtn = document.getElementById("recordBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    let mediaRecorder;
+    let audioChunks = [];
+
+    // Append messages
+    function appendMessage(text, sender="bot") {
+      const div = document.createElement("div");
+      div.classList.add("message", sender === "user" ? "user-message" : "bot-message");
+      div.textContent = text;
+      chatBody.appendChild(div);
+      chatBody.scrollTop = chatBody.scrollHeight;
+    }
+
+    // Handle file upload
+    fileInput.addEventListener("change", async () => {
+      const file = fileInput.files[0];
+      if (!file) return;
+      appendMessage("Uploaded: " + file.name, "user");
+
+      const formData = new FormData();
+      formData.append("file", file);
+
+      appendMessage("Transcribing your audio...", "bot");
+      
+      try {
+        const res = await fetch("/transcribe", { method: "POST", body: formData });
+        const data = await res.json();
+        appendMessage("🗣️ " + data.transcription, "bot");
+      } catch (error) {
+        appendMessage("❌ Error: " + error.message, "bot");
+      }
+      
+      // Reset file input
+      fileInput.value = "";
+    });
+
+    // Handle mic recording
+    recordBtn.onclick = async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream);
+        audioChunks = [];
+        mediaRecorder.start();
+        recordBtn.disabled = true;
+        stopBtn.disabled = false;
+        appendMessage("🎤 Recording started...", "bot");
+
+        mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+      } catch (error) {
+        appendMessage("❌ Microphone access denied: " + error.message, "bot");
+      }
+    };
+
+    stopBtn.onclick = async () => {
+      mediaRecorder.stop();
+      stopBtn.disabled = true;
+      recordBtn.disabled = false;
+      appendMessage("🛑 Recording stopped.", "bot");
+
+      mediaRecorder.onstop = async () => {
+        // Create blob with proper MIME type
+        const blob = new Blob(audioChunks, { type: "audio/webm" });
+        
+        // Convert to WAV using Web Audio API
+        appendMessage("Processing audio...", "bot");
+        
+        try {
+          const arrayBuffer = await blob.arrayBuffer();
+          const audioContext = new AudioContext();
+          const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+          
+          // Convert to WAV
+          const wavBlob = await audioBufferToWav(audioBuffer);
+          
+          const formData = new FormData();
+          formData.append("file", wavBlob, "recorded.wav");
+          appendMessage("Transcribing recorded audio...", "bot");
+
+          const res = await fetch("/transcribe", { method: "POST", body: formData });
+          const data = await res.json();
+          appendMessage("🗣️ " + data.transcription, "bot");
+        } catch (error) {
+          appendMessage("❌ Error: " + error.message, "bot");
+          console.error("Full error:", error);
+        }
+      };
+    };
+
+    // Function to convert AudioBuffer to WAV blob
+    function audioBufferToWav(buffer) {
+      const length = buffer.length * buffer.numberOfChannels * 2 + 44;
+      const arrayBuffer = new ArrayBuffer(length);
+      const view = new DataView(arrayBuffer);
+      const channels = [];
+      let offset = 0;
+      let pos = 0;
+
+      // Write WAV header
+      setUint32(0x46464952); // "RIFF"
+      setUint32(length - 8); // file length - 8
+      setUint32(0x45564157); // "WAVE"
+
+      setUint32(0x20746d66); // "fmt " chunk
+      setUint32(16); // length = 16
+      setUint16(1); // PCM (uncompressed)
+      setUint16(buffer.numberOfChannels);
+      setUint32(buffer.sampleRate);
+      setUint32(buffer.sampleRate * 2 * buffer.numberOfChannels); // avg. bytes/sec
+      setUint16(buffer.numberOfChannels * 2); // block-align
+      setUint16(16); // 16-bit
+
+      setUint32(0x61746164); // "data" - chunk
+      setUint32(length - pos - 4); // chunk length
+
+      // Write interleaved data
+      for (let i = 0; i < buffer.numberOfChannels; i++) {
+        channels.push(buffer.getChannelData(i));
+      }
+
+      while (pos < length) {
+        for (let i = 0; i < buffer.numberOfChannels; i++) {
+          let sample = Math.max(-1, Math.min(1, channels[i][offset]));
+          sample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+          view.setInt16(pos, sample, true);
+          pos += 2;
+        }
+        offset++;
+      }
+
+      return new Blob([arrayBuffer], { type: "audio/wav" });
+
+      function setUint16(data) {
+        view.setUint16(pos, data, true);
+        pos += 2;
+      }
+
+      function setUint32(data) {
+        view.setUint32(pos, data, true);
+        pos += 4;
+      }
+    }
+  </script>
+</body>
+</html>
